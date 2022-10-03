@@ -1,0 +1,22 @@
+[package]
+name = "sol_escrow"
+version = "0.1.0"
+description = "Solana escrow, created with Anchor"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "sol_escrow"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = "0.25.0"
+anchor-spl = {version = "0.25.0"}
+spl-token = {version = "3.3.0", features = ["no-entrypoint"]}
+bytemuck = "1.12.1"
