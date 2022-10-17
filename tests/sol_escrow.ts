@@ -1,11 +1,11 @@
 import * as anchor from "@project-serum/anchor";
-import { Wallet, Program } from "@project-serum/anchor";
+import { Program, Wallet } from "@project-serum/anchor";
 import { SolEscrow } from "../target/types/sol_escrow";
 import {
   TOKEN_PROGRAM_ID,
   createMint,
   mintTo,
-  createAssociatedTokenAccount,
+  getOrCreateAssociatedTokenAccount,
   ASSOCIATED_TOKEN_PROGRAM_ID,
   getAccount
 } from '@solana/spl-token'
@@ -20,130 +20,114 @@ describe("Escrow test", () => {
   anchor.setProvider(provider);
   const program = anchor.workspace.SolEscrow as Program<SolEscrow>
 
-  // Setting up accounts.
+  // Set up constant accounts.
   const alice = anchor.web3.Keypair.generate();
   const bob = anchor.web3.Keypair.generate();
-  const tempTokenXAccount = anchor.web3.Keypair.generate();
-  const escrowAccount = anchor.web3.Keypair.generate();
   const rent = anchor.web3.SYSVAR_RENT_PUBKEY;
   const systemProgram = anchor.web3.SystemProgram.programId;
 
-  it("Initialize and process exchange", async () => {
+  // Other info.
+  const aliceAmountToReceive = 200;
+  const bobAmountToReceive = 400;
+  const escrowSeeds = "sol_escrow";
 
-    // Creating mints X and Y.
-    const mintX = await createMint(
+  // Functions.
+  async function newMint() {
+    return await createMint(
       provider.connection,
       wallet.payer,
       wallet.publicKey,
       null,
-      1,
+      0,
       anchor.web3.Keypair.generate(),
       null,
       TOKEN_PROGRAM_ID
     );
-    const mintY = await createMint(
+  }
+  async function createTokenAccount(
+    mint: anchor.web3.PublicKey,
+    pubKey: anchor.web3.PublicKey
+    ) {
+    let tokenAccount = await getOrCreateAssociatedTokenAccount(
       provider.connection,
       wallet.payer,
-      wallet.publicKey,
-      null,
-      1,
-      anchor.web3.Keypair.generate(),
-      null,
-      TOKEN_PROGRAM_ID
-    );
-
-    // Configuring Alice's token accounts and info.
-    const aliceTokenXAccount = await createAssociatedTokenAccount(
-      provider.connection,
-      wallet.payer,
-      mintX,
-      alice.publicKey,
+      mint,
+      pubKey,
+      false,
+      "processed",
       null,
       TOKEN_PROGRAM_ID,
       ASSOCIATED_TOKEN_PROGRAM_ID
     );
-    const aliceTokenYAccount = await createAssociatedTokenAccount(
-      provider.connection,
-      wallet.payer,
-      mintY,
-      alice.publicKey,
-      null,
-      TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    const aliceAmountToReceive = 200;
-
-    // Configuring Bob's token accounts and info.
-    const bobTokenXAccount = await createAssociatedTokenAccount(
-      provider.connection,
-      wallet.payer,
-      mintX,
-      bob.publicKey,
-      null,
-      TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    const bobTokenYAccount = await createAssociatedTokenAccount(
-      provider.connection,
-      wallet.payer,
-      mintY,
-      bob.publicKey,
-      null,
-      TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    const bobAmountToReceive = 400;
-
-    // Sending the amounts of tokens needed in the tx to Alice and Bob.
+    return tokenAccount.address;
+  }
+  async function mintTokens(
+    mint,
+    tokenAccount,
+    amountToReceive
+    ) {
     await mintTo(
       provider.connection,
       wallet.payer,
-      mintX,
-      aliceTokenXAccount,
+      mint,
+      tokenAccount,
       wallet.publicKey,
-      Number(bobAmountToReceive),
+      amountToReceive,
       [wallet.payer],
       null,
       TOKEN_PROGRAM_ID
     );
-    await mintTo(
-      provider.connection,
-      wallet.payer,
-      mintY,
-      bobTokenYAccount,
-      wallet.publicKey,
-      Number(aliceAmountToReceive),
-      [wallet.payer],
-      null,
-      TOKEN_PROGRAM_ID
-    );
+  }
 
-    // Getting PDA account and bump.
-    const [pda, bump] = await anchor.web3.PublicKey.findProgramAddress(
-      [Buffer.from(anchor.utils.bytes.utf8.encode("escrow"))],
-      program.programId
-    );
+  it("Initialize and finalise exchange", async () => {
 
     // Funding both parties' main accounts.
-    let airdropToAlice = await provider.connection.requestAirdrop(
-      alice.publicKey,
-      5 * LAMPORTS_PER_SOL
-    );
-    let airdropToBob = await provider.connection.requestAirdrop(
-      bob.publicKey,
-      5 * LAMPORTS_PER_SOL
-    );
     let { blockhash, lastValidBlockHeight } = await provider.connection.getLatestBlockhash();
     await provider.connection.confirmTransaction({
       blockhash,
       lastValidBlockHeight,
-      signature: airdropToAlice
+      signature: await provider.connection.requestAirdrop(
+        alice.publicKey,
+        5 * LAMPORTS_PER_SOL
+      )
     });
     await provider.connection.confirmTransaction({
       blockhash,
       lastValidBlockHeight,
-      signature: airdropToBob
+      signature: await
+      provider.connection.requestAirdrop(
+        bob.publicKey,
+        5 * LAMPORTS_PER_SOL
+      )
     });
+
+    // Creating mints X and Y.
+    const mintX = await newMint();
+    const mintY = await newMint();
+
+    // Configuring Alice's token accounts.
+    const aliceTokenXAccount = await createTokenAccount(mintX, alice.publicKey);
+    const aliceTokenYAccount = await createTokenAccount(mintY, alice.publicKey);
+
+    // Configuring Bob's token accounts.
+    const bobTokenXAccount = await createTokenAccount(mintX, bob.publicKey);
+    const bobTokenYAccount = await createTokenAccount(mintY, bob.publicKey);
+
+    // Sending the amounts of tokens needed in the tx to Alice and Bob.
+    await mintTokens(mintX, aliceTokenXAccount, bobAmountToReceive);
+    await mintTokens(mintY, bobTokenYAccount, aliceAmountToReceive);
+
+    // Getting PDA and bump for the escrow account.
+    let [vaultAuthority, bump] = await anchor.web3.PublicKey.findProgramAddress(
+      [Buffer.from(escrowSeeds)],
+      program.programId
+    );
+
+    // Getting address for escrow account.
+    const escrowAccount = anchor.web3.Keypair.generate();
+
+    // Get keypair for temporary token account.
+    const mintXVault = anchor.web3.Keypair.generate();
 
     // Initialize escrow.
     await program
@@ -156,73 +140,66 @@ describe("Escrow test", () => {
       .accounts({
         aliceAccount: alice.publicKey,
         aliceTokenXAccount: aliceTokenXAccount,
-        tempTokenXAccount: tempTokenXAccount.publicKey,
-        aliceTokenYAccount: aliceTokenYAccount,
-        escrowAccount: escrowAccount.publicKey,
         mintX: mintX,
+        mintY: mintY,
+        mintXVault: mintXVault.publicKey,
+        vaultAuthority: vaultAuthority,
+        escrowAccount: escrowAccount.publicKey,
         rent: rent,
-        pda: pda,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: systemProgram
       })
       .signers(
-        [alice, tempTokenXAccount, escrowAccount]
+        [alice, mintXVault, escrowAccount]
       )
       .rpc()
     ;
 
-    // Get temporary token account's info.
-    let tempTokenXAccountInfo = await getAccount(
+    // Assert that the correct amount of tokens is transferred from Alice to the temporary account.
+    let mintXVaultInfo = await getAccount(
       provider.connection,
-      tempTokenXAccount.publicKey,
+      mintXVault.publicKey,
       "processed",
       TOKEN_PROGRAM_ID
     );
-
-    //Check that the correct amount of tokens is transferred from Alice to the temporary account.
     assert.equal(
-      tempTokenXAccountInfo.amount,
+      mintXVaultInfo.amount,
       new anchor.BN(bobAmountToReceive)
     );
 
-    // Check that the escrow account's fields are populated correctly.
+    // Assert that the escrow account's fields are populated correctly.
     let populatedEscrowAccount = await program.account.escrow.fetch(escrowAccount.publicKey);
     assert.equal(
-      (await populatedEscrowAccount).aliceKey.toBase58(),
+      populatedEscrowAccount.aliceKey.toBase58(),
       alice.publicKey.toBase58()
     );
     assert.equal(
-      (await populatedEscrowAccount).aliceTokenXAccount.toBase58(),
-      aliceTokenXAccount.toBase58()
+      populatedEscrowAccount.mintXVault.toBase58(),
+      mintXVault.publicKey.toBase58()
     );
     assert.equal(
-      (await populatedEscrowAccount).aliceTokenYAccount.toBase58(),
-      aliceTokenYAccount.toBase58()
-    );
-    assert.equal(
-      (await populatedEscrowAccount).aliceAmountToReceive.toNumber(),
+      populatedEscrowAccount.aliceAmountToReceive.toNumber(),
       aliceAmountToReceive
     );
     assert.equal(
-      (await populatedEscrowAccount).bobAmountToReceive.toNumber(),
+      populatedEscrowAccount.bobAmountToReceive.toNumber(),
       bobAmountToReceive
     );
 
     // Process exchange.
     await program
       .methods
-      .processExchange(bump)
+      .processExchange()
       .accounts({
         bobAccount: bob.publicKey,
         bobTokenYAccount: bobTokenYAccount,
         bobTokenXAccount: bobTokenXAccount,
-        tempTokenXAccount: tempTokenXAccount.publicKey,
-        pda: pda,
+        mintXVault: mintXVault.publicKey,
+        vaultAuthority: vaultAuthority,
         aliceAccount: alice.publicKey,
         aliceTokenYAccount: aliceTokenYAccount,
         escrowAccount: escrowAccount.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: systemProgram
+        tokenProgram: TOKEN_PROGRAM_ID
       })
       .signers(
         [bob]
@@ -230,7 +207,7 @@ describe("Escrow test", () => {
       .rpc()
     ;
 
-    // Check that Bob received the right amount of tokens.
+    // Assert that Bob and Alice received the right amount of tokens.
     let bobTokenXAccountInfo = await getAccount(
       provider.connection,
       bobTokenXAccount,
@@ -241,8 +218,6 @@ describe("Escrow test", () => {
       bobTokenXAccountInfo.amount,
       new anchor.BN(bobAmountToReceive)
     );
-
-    // Check that Alice received the right amount of tokens.
     let aliceTokenYAccountInfo = await getAccount(
       provider.connection,
       aliceTokenYAccount,
@@ -253,125 +228,31 @@ describe("Escrow test", () => {
       aliceTokenYAccountInfo.amount,
       new anchor.BN(aliceAmountToReceive)
     );
-
   });
 
   it("Initialize and cancel exchange", async () => {
 
     // Creating mints X and Y.
-    const mintX = await createMint(
-      provider.connection,
-      wallet.payer,
-      wallet.publicKey,
-      null,
-      1,
-      anchor.web3.Keypair.generate(),
-      null,
-      TOKEN_PROGRAM_ID
-    );
-    const mintY = await createMint(
-      provider.connection,
-      wallet.payer,
-      wallet.publicKey,
-      null,
-      1,
-      anchor.web3.Keypair.generate(),
-      null,
-      TOKEN_PROGRAM_ID
-    );
+    const mintX = await newMint();
+    const mintY = await newMint();
 
-    // Configuring Alice's token accounts and info.
-    const aliceTokenXAccount = await createAssociatedTokenAccount(
-      provider.connection,
-      wallet.payer,
-      mintX,
-      alice.publicKey,
-      null,
-      TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    const aliceTokenYAccount = await createAssociatedTokenAccount(
-      provider.connection,
-      wallet.payer,
-      mintY,
-      alice.publicKey,
-      null,
-      TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    const aliceAmountToReceive = 200;
+    // Configuring Alice's token X account.
+    const aliceTokenXAccount = await createTokenAccount(mintX, alice.publicKey);
 
-    // Configuring Bob's token accounts and info.
-    const bobTokenXAccount = await createAssociatedTokenAccount(
-      provider.connection,
-      wallet.payer,
-      mintX,
-      bob.publicKey,
-      null,
-      TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    const bobTokenYAccount = await createAssociatedTokenAccount(
-      provider.connection,
-      wallet.payer,
-      mintY,
-      bob.publicKey,
-      null,
-      TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
-    );
-    const bobAmountToReceive = 400;
+    // Sending the amounts of tokens needed in the tx to Alice.
+    await mintTokens(mintX, aliceTokenXAccount, bobAmountToReceive);
 
-    // Sending the amounts of tokens needed in the tx to Alice and Bob.
-    await mintTo(
-      provider.connection,
-      wallet.payer,
-      mintX,
-      aliceTokenXAccount,
-      wallet.publicKey,
-      Number(bobAmountToReceive),
-      [wallet.payer],
-      null,
-      TOKEN_PROGRAM_ID
-    );
-    await mintTo(
-      provider.connection,
-      wallet.payer,
-      mintY,
-      bobTokenYAccount,
-      wallet.publicKey,
-      Number(aliceAmountToReceive),
-      [wallet.payer],
-      null,
-      TOKEN_PROGRAM_ID
-    );
-
-    // Getting PDA account and bump.
-    const [pda, bump] = await anchor.web3.PublicKey.findProgramAddress(
-      [Buffer.from(anchor.utils.bytes.utf8.encode("escrow"))],
+    // Getting PDA and bump for the escrow account.
+    let [vaultAuthority, bump] = await anchor.web3.PublicKey.findProgramAddress(
+      [Buffer.from(escrowSeeds)],
       program.programId
     );
 
-    // Funding both parties' main accounts.
-    let airdropToAlice = await provider.connection.requestAirdrop(
-      alice.publicKey,
-      5 * LAMPORTS_PER_SOL
-    );
-    let airdropToBob = await provider.connection.requestAirdrop(
-      bob.publicKey,
-      5 * LAMPORTS_PER_SOL
-    );
-    let { blockhash, lastValidBlockHeight } = await provider.connection.getLatestBlockhash();
-    await provider.connection.confirmTransaction({
-      blockhash,
-      lastValidBlockHeight,
-      signature: airdropToAlice
-    });
-    await provider.connection.confirmTransaction({
-      blockhash,
-      lastValidBlockHeight,
-      signature: airdropToBob
-    });
+    // Getting address for escrow account.
+    const escrowAccount = anchor.web3.Keypair.generate();
+
+    // Get keypair for temporary token account.
+    const mintXVault = anchor.web3.Keypair.generate();
 
     // Initialize escrow.
     await program
@@ -384,54 +265,42 @@ describe("Escrow test", () => {
       .accounts({
         aliceAccount: alice.publicKey,
         aliceTokenXAccount: aliceTokenXAccount,
-        tempTokenXAccount: tempTokenXAccount.publicKey,
-        aliceTokenYAccount: aliceTokenYAccount,
-        escrowAccount: escrowAccount.publicKey,
         mintX: mintX,
+        mintY: mintY,
+        mintXVault: mintXVault.publicKey,
+        vaultAuthority: vaultAuthority,
+        escrowAccount: escrowAccount.publicKey,
         rent: rent,
-        pda: pda,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: systemProgram
       })
       .signers(
-        [alice, tempTokenXAccount, escrowAccount]
+        [alice, mintXVault, escrowAccount]
       )
       .rpc()
     ;
 
-    // Get temporary token account's and Alice's token account's infos.
-    let tempTokenXAccountInfo = await getAccount(
+    // Assert that the correct amount of tokens is transferred from Alice to the temporary account.
+    let mintXVaultInfo = await getAccount(
       provider.connection,
-      tempTokenXAccount.publicKey,
+      mintXVault.publicKey,
       "processed",
       TOKEN_PROGRAM_ID
     );
-    let aliceTokenXAccountInfo = await getAccount(
-      provider.connection,
-      aliceTokenXAccount,
-      "processed",
-      TOKEN_PROGRAM_ID
-    );
-
-    // Check that the tokens have been transferred from Alice to the temp account.
     assert.equal(
-      tempTokenXAccountInfo.amount,
+      mintXVaultInfo.amount,
       new anchor.BN(bobAmountToReceive)
-    );
-    assert.equal(
-      aliceTokenXAccountInfo.amount,
-      new anchor.BN(0)
     );
 
     // Cancel exchange.
     await program
       .methods
-      .cancel(bump)
+      .cancel()
       .accounts({
         aliceAccount: alice.publicKey,
         aliceTokenXAccount: aliceTokenXAccount,
-        tempTokenXAccount: tempTokenXAccount.publicKey,
-        pda: pda,
+        mintXVault: mintXVault.publicKey,
+        vaultAuthority: vaultAuthority,
         escrowAccount: escrowAccount.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID
       })
@@ -439,8 +308,8 @@ describe("Escrow test", () => {
       .rpc()
     ;
 
-    // Check that the tokens have been transferred back to Alice.
-    aliceTokenXAccountInfo = await getAccount(
+    // Assert that the tokens have been transferred back to Alice.
+    let aliceTokenXAccountInfo = await getAccount(
       provider.connection,
       aliceTokenXAccount,
       "processed",
@@ -450,6 +319,5 @@ describe("Escrow test", () => {
       aliceTokenXAccountInfo.amount,
       new anchor.BN(bobAmountToReceive)
     );
-
   });
 });
