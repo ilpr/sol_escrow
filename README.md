@@ -11,7 +11,7 @@ Escrow program for safe exchange of tokens on Solana, created with Anchor.
 
 ## Build, Deploy and Test the Program
 
-First, add path to your keypair file in Anchor.toml.
+First, add path to your keypair file in `Anchor.toml`.
 
 - Build: `anchor build`
 - Deploy: `anchor deploy`
